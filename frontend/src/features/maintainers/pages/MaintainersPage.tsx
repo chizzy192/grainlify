@@ -165,7 +165,7 @@ export function MaintainersPage({ onNavigate }: MaintainersPageProps) {
   return (
     <div className="space-y-6">
       {/* Top Navigation Bar */}
-      <div className={`backdrop-blur-[40px] rounded-[20px] border shadow-[0_8px_32px_rgba(0,0,0,0.08)] p-2 relative z-10 transition-colors ${
+      <div className={`backdrop-blur-[40px] rounded-[20px] border p-2 relative z-10 transition-colors ${
         theme === 'dark'
           ? 'bg-[#2d2820]/[0.4] border-white/10'
           : 'bg-white/[0.12] border-white/25'
