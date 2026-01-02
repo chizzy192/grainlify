@@ -150,6 +150,10 @@ func New(cfg config.Config, deps Deps) *fiber.App {
 	adminGroup.Put("/ecosystems/:id", auth.RequireRole("admin"), ecosystemsAdmin.Update())
 
 	webhooks := handlers.NewGitHubWebhooksHandler(cfg, deps.DB, deps.Bus)
+	// Register webhook endpoint with explicit OPTIONS support for CORS
+	app.Options("/webhooks/github", func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusOK)
+	})
 	app.Post("/webhooks/github", webhooks.Receive())
 
 	// Didit webhook handler (supports both GET callback redirects and POST webhook events)

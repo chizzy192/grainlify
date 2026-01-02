@@ -34,7 +34,22 @@ func NewGitHubWebhooksHandler(cfg config.Config, d *db.DB, b bus.Bus) *GitHubWeb
 
 func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Handle CORS preflight requests
+		if c.Method() == "OPTIONS" {
+			return c.SendStatus(fiber.StatusOK)
+		}
+
+		// Log all webhook requests immediately (before any checks)
+		slog.Info("GitHub webhook endpoint hit",
+			"method", c.Method(),
+			"path", c.Path(),
+			"original_url", c.OriginalURL(),
+			"remote_ip", c.IP(),
+			"user_agent", c.Get("User-Agent"),
+		)
+
 		if h.cfg.GitHubWebhookSecret == "" {
+			slog.Error("webhook secret not configured")
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook_secret_not_configured"})
 		}
 
@@ -47,11 +62,17 @@ func (h *GitHubWebhooksHandler) Receive() fiber.Handler {
 			"event", event,
 			"delivery_id", delivery,
 			"path", c.Path(),
+			"method", c.Method(),
 		)
 
 		body := c.Body()
 
 		if !verifyGitHubSignature(h.cfg.GitHubWebhookSecret, body, sig) {
+			slog.Warn("GitHub webhook signature verification failed",
+				"delivery_id", delivery,
+				"event", event,
+				"has_signature", sig != "",
+			)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid_signature"})
 		}
 
