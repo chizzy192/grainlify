@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "preview": "vite preview --port 4173"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -75,6 +76,7 @@
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
     "vite": "6.3.5"
+    
   },
   "pnpm": {
     "overrides": {
