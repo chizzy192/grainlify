@@ -54,3 +54,40 @@ pub fn emit_funds_refunded(env: &Env, event: FundsRefunded) {
     let topics = (symbol_short!("f_ref"), event.bounty_id);
     env.events().publish(topics, event.clone());
 }
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FeeOperationType {
+    Lock,
+    Release,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeCollected {
+    pub operation_type: FeeOperationType,
+    pub amount: i128,
+    pub fee_rate: i128,
+    pub recipient: Address,
+    pub timestamp: u64,
+}
+
+pub fn emit_fee_collected(env: &Env, event: FeeCollected) {
+    let topics = (symbol_short!("fee"), );
+    env.events().publish(topics, event.clone());
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeConfigUpdated {
+    pub lock_fee_rate: i128,
+    pub release_fee_rate: i128,
+    pub fee_recipient: Address,
+    pub fee_enabled: bool,
+    pub timestamp: u64,
+}
+
+pub fn emit_fee_config_updated(env: &Env, event: FeeConfigUpdated) {
+    let topics = (symbol_short!("fee_cfg"), );
+    env.events().publish(topics, event.clone());
+}
