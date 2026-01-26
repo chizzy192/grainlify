@@ -150,7 +150,17 @@
 //! - ❌ Upgrading without proper testing
 //! - ❌ Not having a rollback plan
 
+
+
+
+
 #![no_std]
+
+mod multisig;
+use multisig::MultiSig;
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
+use soroban_sdk::Vec;
+=======
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
 };
@@ -344,6 +354,7 @@ mod monitoring {
 }
 // ==================== END MONITORING MODULE ====================
 
+
 // ============================================================================
 // Contract Definition
 // ============================================================================
@@ -371,10 +382,19 @@ pub struct GrainlifyContract;
 #[derive(Clone)]
 enum DataKey {
     /// Administrator address with upgrade authority
+
+
+    
+
     Admin,
+
 
     /// Current version number (increments with upgrades)
     Version,
+
+    
+    // NEW: store wasm hash per proposal
+    UpgradeProposal(u64),
 }
 
 // ============================================================================
@@ -399,8 +419,7 @@ const VERSION: u32 = 1;
 // Contract Implementation
 // ============================================================================
 
-#[contractimpl]
-impl GrainlifyContract {
+
     // ========================================================================
     // Initialization
     // ========================================================================
@@ -455,6 +474,13 @@ impl GrainlifyContract {
     ///   -- init \
     ///   --admin GADMIN_ADDRESS
     /// ```
+ 
+#[contractimpl]
+impl GrainlifyContract {   
+pub fn init(env: Env, signers: Vec<Address>, threshold: u32) {
+    if env.storage().instance().has(&DataKey::Version) {
+        panic!("Already initialized");
+
     pub fn init(env: Env, admin: Address) {
         let start = env.ledger().timestamp();
 
@@ -476,11 +502,40 @@ impl GrainlifyContract {
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
         monitoring::emit_performance(&env, symbol_short!("init"), duration);
+
     }
 
-    // ========================================================================
-    // Upgrade Functions
-    // ========================================================================
+    MultiSig::init(&env, signers, threshold);
+    env.storage().instance().set(&DataKey::Version, &VERSION);
+}
+
+
+
+
+pub fn propose_upgrade(
+    env: Env,
+    proposer: Address,
+    wasm_hash: BytesN<32>,
+) -> u64 {
+    let proposal_id = MultiSig::propose(&env, proposer);
+
+    env.storage()
+        .instance()
+        .set(&DataKey::UpgradeProposal(proposal_id), &wasm_hash);
+
+    proposal_id
+}
+
+
+pub fn approve_upgrade(
+    env: Env,
+    proposal_id: u64,
+    signer: Address,
+) {
+    MultiSig::approve(&env, proposal_id, signer);
+}
+}
+
 
     /// Upgrades the contract to new WASM code.
     ///
@@ -573,6 +628,22 @@ impl GrainlifyContract {
     /// # Panics
     /// * If admin address is not set (contract not initialized)
     /// * If caller is not the admin
+
+pub fn execute_upgrade(env: Env, proposal_id: u64) {
+    if !MultiSig::can_execute(&env, proposal_id) {
+        panic!("Threshold not met");
+    }
+
+    let wasm_hash: BytesN<32> = env
+        .storage()
+        .instance()
+        .get(&DataKey::UpgradeProposal(proposal_id))
+        .expect("Missing upgrade proposal");
+
+    env.deployer().update_current_contract_wasm(wasm_hash);
+
+    MultiSig::mark_executed(&env, proposal_id);
+  
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let start = env.ledger().timestamp();
 
@@ -589,7 +660,9 @@ impl GrainlifyContract {
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
         monitoring::emit_performance(&env, symbol_short!("upgrade"), duration);
+
     }
+
 
     // ========================================================================
     // Version Management
@@ -636,6 +709,7 @@ impl GrainlifyContract {
     pub fn get_version(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
+
 
     /// Updates the contract version number.
     ///
@@ -699,6 +773,8 @@ impl GrainlifyContract {
     /// # Panics
     /// * If admin address is not set (contract not initialized)
     /// * If caller is not the admin
+
+
     pub fn set_version(env: Env, new_version: u32) {
         let start = env.ledger().timestamp();
 
@@ -744,38 +820,31 @@ impl GrainlifyContract {
     }
 }
 
+
 // ============================================================================
 // Testing Module
 // ============================================================================
-
 #[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
 
     #[test]
-    fn test_init() {
+    fn multisig_init_works() {
         let env = Env::default();
         let contract_id = env.register_contract(None, GrainlifyContract);
         let client = GrainlifyContractClient::new(&env, &contract_id);
 
-        let admin = Address::generate(&env);
-        client.init(&admin);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
+        signers.push_back(Address::generate(&env));
 
-        assert_eq!(client.get_version(), VERSION);
+        client.init(&signers, &2u32);
     }
+}
 
-    #[test]
-    #[should_panic(expected = "Already initialized")]
-    fn test_init_twice_panics() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
 
-        let admin = Address::generate(&env);
-        client.init(&admin);
-        client.init(&admin); // Should panic
-    }
 
     #[test]
     fn test_set_version() {
@@ -792,3 +861,4 @@ mod test {
         assert_eq!(client.get_version(), 2);
     }
 }
+

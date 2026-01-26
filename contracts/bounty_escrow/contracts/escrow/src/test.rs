@@ -819,3 +819,56 @@ fn test_get_balance() {
     // Balance should be updated
     assert_eq!(setup.escrow.get_balance(), amount);
 }
+
+// ========================================================================
+// Anti-Abuse Tests
+// ========================================================================
+
+#[test]
+#[should_panic(expected = "Operation in cooldown period")]
+fn test_anti_abuse_cooldown_panic() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(1000);
+    
+    // Default cooldown is 60s
+    setup.escrow.lock_funds(&setup.depositor, &1, &100, &2000);
+    
+    setup.env.ledger().set_timestamp(1030); // 30s < 60s
+    setup.escrow.lock_funds(&setup.depositor, &2, &100, &2000); // Should panic
+}
+
+#[test]
+#[should_panic(expected = "Rate limit exceeded")]
+fn test_anti_abuse_limit_panic() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(1000);
+    
+    setup.escrow.update_rate_limit_config(&3600, &1, &0); // 1 op max
+    
+    setup.escrow.lock_funds(&setup.depositor, &1, &100, &2000);
+    setup.escrow.lock_funds(&setup.depositor, &2, &100, &2000); // Should panic
+}
+
+#[test]
+fn test_anti_abuse_whitelist() {
+    let setup = TestSetup::new();
+    setup.env.ledger().set_timestamp(1000);
+    
+    setup.escrow.update_rate_limit_config(&3600, &1, &60); // 1 op max
+    
+    setup.escrow.set_whitelist(&setup.depositor, &true);
+    
+    setup.escrow.lock_funds(&setup.depositor, &1, &100, &2000);
+    setup.escrow.lock_funds(&setup.depositor, &2, &100, &2000); // Works because whitelisted
+}
+
+#[test]
+fn test_anti_abuse_config_update() {
+    let setup = TestSetup::new();
+    setup.escrow.update_rate_limit_config(&7200, &5, &120);
+    
+    let config = setup.escrow.get_rate_limit_config();
+    assert_eq!(config.window_size, 7200);
+    assert_eq!(config.max_operations, 5);
+    assert_eq!(config.cooldown_period, 120);
+}

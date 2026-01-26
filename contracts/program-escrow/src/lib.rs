@@ -333,6 +333,127 @@ mod monitoring {
 }
 // ==================== END MONITORING MODULE ====================
 
+// ==================== ANTI-ABUSE MODULE ====================
+mod anti_abuse {
+    use soroban_sdk::{contracttype, symbol_short, Address, Env};
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AntiAbuseConfig {
+        pub window_size: u64,      // Window size in seconds
+        pub max_operations: u32,   // Max operations allowed in window
+        pub cooldown_period: u64, // Minimum seconds between operations
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AddressState {
+        pub last_operation_timestamp: u64,
+        pub window_start_timestamp: u64,
+        pub operation_count: u32,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum AntiAbuseKey {
+        Config,
+        State(Address),
+        Whitelist(Address),
+        Admin,
+    }
+
+    pub fn get_config(env: &Env) -> AntiAbuseConfig {
+        env.storage()
+            .instance()
+            .get(&AntiAbuseKey::Config)
+            .unwrap_or(AntiAbuseConfig {
+                window_size: 3600, // 1 hour default
+                max_operations: 10,
+                cooldown_period: 60, // 1 minute default
+            })
+    }
+
+    pub fn set_config(env: &Env, config: AntiAbuseConfig) {
+        env.storage().instance().set(&AntiAbuseKey::Config, &config);
+    }
+
+    pub fn is_whitelisted(env: &Env, address: Address) -> bool {
+        env.storage()
+            .instance()
+            .has(&AntiAbuseKey::Whitelist(address))
+    }
+
+    pub fn set_whitelist(env: &Env, address: Address, whitelisted: bool) {
+        if whitelisted {
+            env.storage()
+                .instance()
+                .set(&AntiAbuseKey::Whitelist(address), &true);
+        } else {
+            env.storage()
+                .instance()
+                .remove(&AntiAbuseKey::Whitelist(address));
+        }
+    }
+
+    pub fn get_admin(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&AntiAbuseKey::Admin)
+    }
+
+    pub fn set_admin(env: &Env, admin: Address) {
+        env.storage().instance().set(&AntiAbuseKey::Admin, &admin);
+    }
+
+    pub fn check_rate_limit(env: &Env, address: Address) {
+        if is_whitelisted(env, address.clone()) {
+            return;
+        }
+
+        let config = get_config(env);
+        let now = env.ledger().timestamp();
+        let key = AntiAbuseKey::State(address.clone());
+
+        let mut state: AddressState = env.storage().persistent().get(&key).unwrap_or(AddressState {
+            last_operation_timestamp: 0,
+            window_start_timestamp: now,
+            operation_count: 0,
+        });
+
+        // 1. Cooldown check
+        if state.last_operation_timestamp > 0
+            && now < state.last_operation_timestamp.saturating_add(config.cooldown_period)
+        {
+            env.events().publish(
+                (symbol_short!("abuse"), symbol_short!("cooldown")),
+                (address.clone(), now),
+            );
+            panic!("Operation in cooldown period");
+        }
+
+        // 2. Window check
+        if now >= state.window_start_timestamp.saturating_add(config.window_size) {
+            // New window
+            state.window_start_timestamp = now;
+            state.operation_count = 1;
+        } else {
+            // Same window
+            if state.operation_count >= config.max_operations {
+                env.events().publish(
+                    (symbol_short!("abuse"), symbol_short!("limit")),
+                    (address.clone(), now),
+                );
+                panic!("Rate limit exceeded");
+            }
+            state.operation_count += 1;
+        }
+
+        state.last_operation_timestamp = now;
+        env.storage().persistent().set(&key, &state);
+
+        // Extend TTL for state (approx 1 day)
+        env.storage().persistent().extend_ttl(&key, 17280, 17280);
+    }
+}
+
 // ============================================================================
 // Event Types
 // ============================================================================
@@ -540,6 +661,9 @@ impl ProgramEscrowContract {
         authorized_payout_key: Address,
         token_address: Address,
     ) -> ProgramData {
+        // Apply rate limiting
+        anti_abuse::check_rate_limit(&env, authorized_payout_key.clone());
+
         let start = env.ledger().timestamp();
         let caller = authorized_payout_key.clone();
 
@@ -709,6 +833,9 @@ impl ProgramEscrowContract {
     /// -  Not verifying contract received the tokens
 
     pub fn lock_program_funds(env: Env, program_id: String, amount: i128) -> ProgramData {
+        // Apply rate limiting
+        anti_abuse::check_rate_limit(&env, env.current_contract_address());
+
         let start = env.ledger().timestamp();
         let caller = env.current_contract_address();
 
@@ -857,6 +984,9 @@ impl ProgramEscrowContract {
         recipients: Vec<Address>,
         amounts: Vec<i128>,
     ) -> ProgramData {
+        // Apply rate limiting to the contract itself or the program
+        // We can't easily get the caller here without getting program data first
+        
         // Get program data
         let program_key = DataKey::Program(program_id.clone());
         let program_data: ProgramData = env
@@ -864,6 +994,9 @@ impl ProgramEscrowContract {
             .instance()
             .get(&program_key)
             .unwrap_or_else(|| panic!("Program not found"));
+
+        // Apply rate limiting to the authorized payout key
+        anti_abuse::check_rate_limit(&env, program_data.authorized_payout_key.clone());
 
         // Verify authorization - CRITICAL
         program_data.authorized_payout_key.require_auth();
@@ -1005,6 +1138,9 @@ impl ProgramEscrowContract {
             .instance()
             .get(&program_key)
             .unwrap_or_else(|| panic!("Program not found"));
+
+        // Apply rate limiting to the authorized payout key
+        anti_abuse::check_rate_limit(&env, program_data.authorized_payout_key.clone());
 
         program_data.authorized_payout_key.require_auth();
         // Verify authorization
@@ -1168,6 +1304,59 @@ impl ProgramEscrowContract {
     pub fn get_performance_stats(env: Env, function_name: Symbol) -> monitoring::PerformanceStats {
         monitoring::get_performance_stats(&env, function_name)
     }
+
+    // ========================================================================
+    // Anti-Abuse Administrative Functions
+    // ========================================================================
+
+    /// Sets the administrative address for anti-abuse configuration.
+    /// Can only be called once or by the existing admin.
+    pub fn set_admin(env: Env, new_admin: Address) {
+        if let Some(current_admin) = anti_abuse::get_admin(&env) {
+            current_admin.require_auth();
+        }
+        anti_abuse::set_admin(&env, new_admin);
+    }
+
+    /// Updates the rate limit configuration.
+    /// Only the admin can call this.
+    pub fn update_rate_limit_config(
+        env: Env,
+        window_size: u64,
+        max_operations: u32,
+        cooldown_period: u64,
+    ) {
+        let admin = anti_abuse::get_admin(&env).expect("Admin not set");
+        admin.require_auth();
+
+        anti_abuse::set_config(
+            &env,
+            anti_abuse::AntiAbuseConfig {
+                window_size,
+                max_operations,
+                cooldown_period,
+            },
+        );
+    }
+
+    /// Adds or removes an address from the whitelist.
+    /// Only the admin can call this.
+    pub fn set_whitelist(env: Env, address: Address, whitelisted: bool) {
+        let admin = anti_abuse::get_admin(&env).expect("Admin not set");
+        admin.require_auth();
+
+        anti_abuse::set_whitelist(&env, address, whitelisted);
+    }
+
+    /// Checks if an address is whitelisted.
+    pub fn is_whitelisted(env: Env, address: Address) -> bool {
+        anti_abuse::is_whitelisted(&env, address)
+    }
+
+    /// Gets the current rate limit configuration.
+    pub fn get_rate_limit_config(env: Env) -> anti_abuse::AntiAbuseConfig {
+        anti_abuse::get_config(&env)
+    }
 }
 
 /// ============================================================================
@@ -1178,7 +1367,7 @@ impl ProgramEscrowContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _},
         token, Address, Env, String,
     };
 
@@ -1479,5 +1668,93 @@ mod test {
 
         client.initialize_program(&String::from_str(&env, "P3"), &backend, &token);
         assert_eq!(client.get_program_count(), 3);
+    }
+
+    // ========================================================================
+    // Anti-Abuse Tests
+    // ========================================================================
+
+    #[test]
+    #[should_panic(expected = "Operation in cooldown period")]
+    fn test_anti_abuse_cooldown_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1000);
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+        client.update_rate_limit_config(&3600, &10, &60);
+
+        let backend = Address::generate(&env);
+        let token = Address::generate(&env);
+        
+        client.initialize_program(&String::from_str(&env, "P1"), &backend, &token);
+        
+        // Advance time by 30s (less than 60s cooldown)
+        env.ledger().with_mut(|li| li.timestamp += 30);
+        
+        client.initialize_program(&String::from_str(&env, "P2"), &backend, &token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Rate limit exceeded")]
+    fn test_anti_abuse_limit_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1000);
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+        client.update_rate_limit_config(&3600, &2, &0); // 2 ops max, no cooldown
+
+        let backend = Address::generate(&env);
+        let token = Address::generate(&env);
+        
+        client.initialize_program(&String::from_str(&env, "P1"), &backend, &token);
+        client.initialize_program(&String::from_str(&env, "P2"), &backend, &token);
+        client.initialize_program(&String::from_str(&env, "P3"), &backend, &token); // Should panic
+    }
+
+    #[test]
+    fn test_anti_abuse_whitelist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1000);
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+        client.update_rate_limit_config(&3600, &1, &60); // 1 op max
+
+        let backend = Address::generate(&env);
+        let token = Address::generate(&env);
+        
+        client.set_whitelist(&backend, &true);
+        
+        client.initialize_program(&String::from_str(&env, "P1"), &backend, &token);
+        client.initialize_program(&String::from_str(&env, "P2"), &backend, &token); // Should work because whitelisted
+    }
+
+    #[test]
+    fn test_anti_abuse_config_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgramEscrowContract);
+        let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+        
+        client.update_rate_limit_config(&7200, &5, &120);
+        
+        let config = client.get_rate_limit_config();
+        assert_eq!(config.window_size, 7200);
+        assert_eq!(config.max_operations, 5);
+        assert_eq!(config.cooldown_period, 120);
     }
 }
