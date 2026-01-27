@@ -1,15 +1,11 @@
 #![cfg(test)]
 
-use soroban_sdk::{ vec;
-    testutils::{Address as _},
-    token, Address, Env
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    token, vec, Address, Env,
 };
-use soroban_sdk::testutils::Events;
-
 
 use crate::{BountyEscrowContract, BountyEscrowContractClient};
-use soroban_sdk::testutils::Events;
-use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
 fn create_test_env() -> (Env, BountyEscrowContractClient<'static>, Address) {
     let env = Env::default();
